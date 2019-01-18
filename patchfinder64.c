@@ -261,6 +261,7 @@ xref64(const uint8_t *buf, addr_t start, addr_t end, addr_t what)
             signed adr = ((op & 0x60000000) >> 18) | ((op & 0xFFFFE0) << 8);
             //printf("%llx: ADRP X%d, 0x%llx\n", i, reg, ((long long)adr << 1) + (i & ~0xFFF));
             value[reg] = ((long long)adr << 1) + (i & ~0xFFF);
+            continue;				// XXX should not XREF on its own?
         /*} else if ((op & 0xFFE0FFE0) == 0xAA0003E0) {
             unsigned rd = op & 0x1F;
             unsigned rm = (op >> 16) & 0x1F;
