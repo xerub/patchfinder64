@@ -432,10 +432,38 @@ follow_cbz(const uint8_t *buf, addr_t cbz)
 #include <stdlib.h>
 #include <unistd.h>
 #include <mach-o/loader.h>
+//#include "vfs.h" // img4lib
 
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
 #include <mach/mach.h>
 size_t kread(uint64_t where, void *p, size_t size);
+#elif defined(VFS_H_included)
+#define INVALID_HANDLE NULL
+static FHANDLE
+OPEN(const char *filename, int oflag)
+{
+    // XXX use sub_reopen() to handle FAT
+    return img4_reopen(file_open(filename, oflag), NULL, 0);
+}
+#define CLOSE(fd) (fd)->close(fd)
+#define READ(fd, buf, sz) (fd)->read(fd, buf, sz)
+static ssize_t
+PREAD(FHANDLE fd, void *buf, size_t count, off_t offset)
+{
+    ssize_t rv;
+    //off_t pos = fd->lseek(FHANDLE fd, 0, SEEK_CUR);
+    fd->lseek(fd, offset, SEEK_SET);
+    rv = fd->read(fd, buf, count);
+    //fd->lseek(FHANDLE fd, pos, SEEK_SET);
+    return rv;
+}
+#else
+#define FHANDLE int
+#define INVALID_HANDLE -1
+#define OPEN open
+#define CLOSE close
+#define READ read
+#define PREAD pread
 #endif
 
 static uint8_t *kernel = NULL;
@@ -461,33 +489,32 @@ init_kernel(addr_t base, const char *filename)
     uint8_t buf[0x4000];
     unsigned i, j;
     const struct mach_header *hdr = (struct mach_header *)buf;
+    FHANDLE fd = INVALID_HANDLE;
     const uint8_t *q;
     addr_t min = -1;
     addr_t max = 0;
     int is64 = 0;
 
+    if (filename == NULL) {
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
-#define close(f)
-    rv = kread(base, buf, sizeof(buf));
-    if (rv != sizeof(buf)) {
+        rv = kread(base, buf, sizeof(buf));
+        if (rv != sizeof(buf) || !MACHO(buf)) {
+            return -1;
+        }
+#else
+        (void)base;
         return -1;
-    }
-#else	/* __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ */
-    int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        return -1;
-    }
-
-    rv = read(fd, buf, sizeof(buf));
-    if (rv != sizeof(buf)) {
-        close(fd);
-        return -1;
-    }
-#endif	/* __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ */
-
-    if (!MACHO(buf)) {
-        close(fd);
-        return -1;
+#endif
+    } else {
+        fd = OPEN(filename, O_RDONLY);
+        if (fd == INVALID_HANDLE) {
+            return -1;
+        }
+        rv = READ(fd, buf, sizeof(buf));
+        if (rv != sizeof(buf) || !MACHO(buf)) {
+            CLOSE(fd);
+            return -1;
+        }
     }
 
     if (IS64(buf)) {
@@ -557,53 +584,50 @@ init_kernel(addr_t base, const char *filename)
     pstring_base -= kerndumpbase;
     kernel_size = max - min;
 
+    if (filename == NULL) {
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
-    kernel = malloc(kernel_size);
-    if (!kernel) {
-        return -1;
-    }
-    rv = kread(kerndumpbase, kernel, kernel_size);
-    if (rv != kernel_size) {
-        free(kernel);
-        return -1;
-    }
-
-    kernel_mh = kernel + base - min;
-
-    (void)filename;
-#undef close
-#else	/* __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ */
-    kernel = calloc(1, kernel_size);
-    if (!kernel) {
-        close(fd);
-        return -1;
-    }
-
-    q = buf + sizeof(struct mach_header) + is64;
-    for (i = 0; i < hdr->ncmds; i++) {
-        const struct load_command *cmd = (struct load_command *)q;
-        if (cmd->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *seg = (struct segment_command_64 *)q;
-            size_t sz = pread(fd, kernel + seg->vmaddr - min, seg->filesize, seg->fileoff);
-            if (sz != seg->filesize) {
-                close(fd);
-                free(kernel);
-                return -1;
-            }
-            if (!kernel_mh) {
-                kernel_mh = kernel + seg->vmaddr - min;
-            }
-            if (!strcmp(seg->segname, "__LINKEDIT")) {
-                kernel_delta = seg->vmaddr - min - seg->fileoff;
-            }
+        kernel = malloc(kernel_size);
+        if (!kernel) {
+            return -1;
         }
-        q = q + cmd->cmdsize;
+        rv = kread(kerndumpbase, kernel, kernel_size);
+        if (rv != kernel_size) {
+            free(kernel);
+            return -1;
+        }
+
+        kernel_mh = kernel + base - min;
+#endif
+    } else {
+        kernel = calloc(1, kernel_size);
+        if (!kernel) {
+            CLOSE(fd);
+            return -1;
+        }
+
+        q = buf + sizeof(struct mach_header) + is64;
+        for (i = 0; i < hdr->ncmds; i++) {
+            const struct load_command *cmd = (struct load_command *)q;
+            if (cmd->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *seg = (struct segment_command_64 *)q;
+                size_t sz = PREAD(fd, kernel + seg->vmaddr - min, seg->filesize, seg->fileoff);
+                if (sz != seg->filesize) {
+                    CLOSE(fd);
+                    free(kernel);
+                    return -1;
+                }
+                if (!kernel_mh) {
+                    kernel_mh = kernel + seg->vmaddr - min;
+                }
+                if (!strcmp(seg->segname, "__LINKEDIT")) {
+                    kernel_delta = seg->vmaddr - min - seg->fileoff;
+                }
+            }
+            q = q + cmd->cmdsize;
+        }
+
+        CLOSE(fd);
     }
-
-    close(fd);
-
-    (void)base;
-#endif	/* __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ */
     return 0;
 }
 
