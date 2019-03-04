@@ -526,10 +526,10 @@ init_kernel(addr_t base, const char *filename)
         const struct load_command *cmd = (struct load_command *)q;
         if (cmd->cmd == LC_SEGMENT_64) {
             const struct segment_command_64 *seg = (struct segment_command_64 *)q;
-            if (min > seg->vmaddr) {
+            if (min > seg->vmaddr && seg->vmsize > 0) {
                 min = seg->vmaddr;
             }
-            if (max < seg->vmaddr + seg->vmsize) {
+            if (max < seg->vmaddr + seg->vmsize && seg->vmsize > 0) {
                 max = seg->vmaddr + seg->vmsize;
             }
             if (!strcmp(seg->segname, "__TEXT_EXEC")) {
@@ -593,6 +593,7 @@ init_kernel(addr_t base, const char *filename)
         rv = kread(kerndumpbase, kernel, kernel_size);
         if (rv != kernel_size) {
             free(kernel);
+            kernel = NULL;
             return -1;
         }
 
@@ -614,6 +615,7 @@ init_kernel(addr_t base, const char *filename)
                 if (sz != seg->filesize) {
                     CLOSE(fd);
                     free(kernel);
+                    kernel = NULL;
                     return -1;
                 }
                 if (!kernel_mh) {
