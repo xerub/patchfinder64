@@ -437,7 +437,9 @@ follow_cbz(const uint8_t *buf, addr_t cbz)
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
 #include <mach/mach.h>
 size_t kread(uint64_t where, void *p, size_t size);
-#elif defined(VFS_H_included)
+#endif
+
+#ifdef VFS_H_included
 #define INVALID_HANDLE NULL
 static FHANDLE
 OPEN(const char *filename, int oflag)
