@@ -444,8 +444,26 @@ size_t kread(uint64_t where, void *p, size_t size);
 static FHANDLE
 OPEN(const char *filename, int oflag)
 {
-    // XXX use sub_reopen() to handle FAT
-    return img4_reopen(file_open(filename, oflag), NULL, 0);
+    ssize_t rv;
+    char buf[28];
+    FHANDLE fd = file_open(filename, oflag);
+    if (!fd) {
+        return NULL;
+    }
+    rv = fd->read(fd, buf, 4);
+    fd->lseek(fd, 0, SEEK_SET);
+    if (rv == 4 && !MACHO(buf)) {
+        fd = img4_reopen(fd, NULL, 0);
+        if (!fd) {
+            return NULL;
+        }
+        rv = fd->read(fd, buf, sizeof(buf));
+        if (rv == sizeof(buf) && *(uint32_t *)buf == 0xBEBAFECA && __builtin_bswap32(*(uint32_t *)(buf + 4)) > 0) {
+            return sub_reopen(fd, __builtin_bswap32(*(uint32_t *)(buf + 16)), __builtin_bswap32(*(uint32_t *)(buf + 20)));
+        }
+        fd->lseek(fd, 0, SEEK_SET);
+    }
+    return fd;
 }
 #define CLOSE(fd) (fd)->close(fd)
 #define READ(fd, buf, sz) (fd)->read(fd, buf, sz)
