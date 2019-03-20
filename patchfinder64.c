@@ -645,6 +645,7 @@ term_kernel(void)
 #define INSN_CALL 0x94000000, 0xFC000000
 #define INSN_B    0x14000000, 0xFC000000
 #define INSN_CBZ  0x34000000, 0xFC000000
+#define INSN_BLR  0xD63F0000, 0xFFFFFC1F
 
 addr_t
 find_register_value(addr_t where, int reg)
@@ -1053,6 +1054,208 @@ find_amficache(void)
     return val + kerndumpbase;
 }
 
+addr_t
+find_cache(int dynamic)
+{
+    addr_t call;
+    addr_t func;
+    addr_t val;
+    addr_t amfiUC_inTrustCache = find_strref("%s: only allowed process can check the trust cache", 1, 1); // Trying to find AppleMobileFileIntegrityUserClient::isCdhashInTrustCache
+    if (!amfiUC_inTrustCache) {
+        return 0;
+    }
+    amfiUC_inTrustCache -= kerndumpbase;
+
+    call = step64_back(kernel, amfiUC_inTrustCache, 11 * 4, INSN_CALL);
+    if (!call) {
+        return 0;
+    }
+    func = follow_call64(kernel, call);
+
+    call = step64(kernel, func, 8 * 4, INSN_CALL);
+    if (!call) {
+        return 0;
+    }
+    func = follow_call64(kernel, call);
+
+    call = step64(kernel, func, 8 * 4, INSN_CALL);
+    if (!call) {
+        return 0;
+    }
+    if (dynamic) {
+        // We ignore the above call, as we are looking for the dynamic cache
+        call = step64(kernel, call + 4, 8 * 4, INSN_CALL);
+        if (!call) {
+            return 0;
+        }
+        func = follow_call64(kernel, call);
+        val = calc64(kernel, func, func + 16 * 4, 21);
+    } else {
+        func = follow_call64(kernel, call);
+        val = calc64(kernel, func, func + 12 * 4, 9);
+    }
+    if (!val) {
+        return 0;
+    }
+
+    return val + kerndumpbase;
+}
+
+addr_t
+find_add_x0_x0_0x40_ret(void)
+{
+    // csblob_get_cdhash()
+    static const uint8_t insn[] = { 0x00, 0x00, 0x01, 0x91, 0xc0, 0x03, 0x5f, 0xd6 }; // 0x91010000, 0xD65F03C0
+
+    uint8_t *str;
+    str = boyermoore_horspool_memmem(kernel + xnucore_base, xnucore_size, insn, sizeof(insn));
+    if (str) {
+        return str - kernel + kerndumpbase;
+    }
+    str = boyermoore_horspool_memmem(kernel + prelink_base, prelink_size, insn, sizeof(insn));
+    if (str) {
+        return str - kernel + kerndumpbase;
+    }
+    return 0;
+}
+
+addr_t
+find_vfs_context_current(void)
+{
+    addr_t bof, call;
+    addr_t ref = find_strref("\"vnode_put(%p): iocount < 1\"", 1, 0);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    bof = bof64(kernel, xnucore_base, ref);
+    if (!bof) {
+        return 0;
+    }
+    call = find_call64(kernel, bof, 100);
+    if (!call) {
+        return 0;
+    }
+    call = follow_call64(kernel, call);
+    if (!call) {
+        return 0;
+    }
+    return call + kerndumpbase;
+}
+
+addr_t
+find_vnode_lookup(void)
+{
+    addr_t call;
+    addr_t ref = find_strref("/private/var/mobile", 1, 0);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    call = find_call64(kernel, ref, 100);
+    if (!call) {
+        return 0;
+    }
+    call = find_call64(kernel, call + 4, 100);
+    if (!call) {
+        return 0;
+    }
+    call = find_call64(kernel, call + 4, 100);
+    if (!call) {
+        return 0;
+    }
+    call = follow_call64(kernel, call);
+    if (!call) {
+        return 0;
+    }
+    return call + kerndumpbase;
+}
+
+addr_t
+find_vnode_put(void)
+{
+    addr_t call, stub, val;
+    addr_t ref = find_strref("hfs: set VeryLowDisk: vol:%s, backingstore b_avail:%lld, tag:%d\n", 1, 1);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    call = find_call64(kernel, ref, 32);
+    if (!call) {
+        return 0;
+    }
+    call = find_call64(kernel, call + 4, 32);
+    if (!call) {
+        return 0;
+    }
+    stub = follow_call64(kernel, call);
+    val = calc64(kernel, stub, stub + 12, 16);
+    if (!val) {
+        return 0;
+    }
+    return *(uint64_t *)(kernel + val);
+}
+
+addr_t
+find_rootvnode(void)
+{
+    addr_t blr, val;
+    addr_t ref = find_strref("\"bsd_init: cannot find root vnode: %s\"", 1, 0);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    blr = step64_back(kernel, ref, 100, INSN_BLR);
+    if (!blr) {
+        return 0;
+    }
+    val = calc64(kernel, blr - 16, blr, 1);
+    if (!val) {
+        return 0;
+    }
+#if 0
+    assert(calc64(kernel, ref, ref + 16, 0) == val);
+#endif
+    return val + kerndumpbase;
+}
+
+addr_t
+find_zone_map_ref(void)
+{
+    addr_t bof, val;
+    addr_t ref = find_strref("\"Nothing being freed to the zone_map. start = end = %p\\n\"", 1, 0);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    bof = bof64(kernel, xnucore_base, ref);
+    if (!bof) {
+        return 0;
+    }
+#if 0
+#define INSN_ADRP 0x90000000, 0x9F000000
+    addr_t pos;
+    int r = -1, reg = *(uint32_t *)(kernel + ref) & 0x1F;
+    for (pos = ref; pos > bof; pos -= 4) {
+        pos = step64_back(kernel, pos, pos - bof, INSN_ADRP);
+        if (!pos) {
+            break;
+        }
+        r = *(uint32_t *)(kernel + pos) & 0x1F;
+        if (r != reg) {
+            printf("\t0x%llx\n", pos + kerndumpbase);
+            break;
+        }
+    }
+    assert(r != reg && r == 9);
+#endif
+    val = calc64(kernel, bof, ref, 9);
+    if (!val) {
+        return 0;
+    }
+    return val + kerndumpbase;
+}
+
 /* extra_recipe **************************************************************/
 
 #define INSN_STR8 0xF9000000 | 8, 0xFFC00000 | 0x1F
@@ -1224,8 +1427,14 @@ main(int argc, char **argv)
     printf("\t\t\t<string>0x%llx</string>\n", call5 - vm_kernel_slide);
 
     addr_t trustcache = find_trustcache();
+    if (!trustcache) {
+        trustcache = find_cache(1);
+    }
     printf("\t\t\t<string>0x%llx</string>\n", trustcache);
     addr_t amficache = find_amficache();
+    if (!amficache) {
+        amficache = find_cache(0);
+    }
     printf("\t\t\t<string>0x%llx</string>\n", amficache);
 
     term_kernel();
