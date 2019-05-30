@@ -828,7 +828,12 @@ find_kernel_pmap(void)
     if (!bof) {
         return 0;
     }
-    val = calc64(kernel, bof, call, 2);
+    if(kernel_version == 18) {
+        // iOS 12
+        val = calc64(kernel, bof, call, 8);
+    } else {
+        val = calc64(kernel, bof, call, 2);
+    }
     if (!val) {
         return 0;
     }
