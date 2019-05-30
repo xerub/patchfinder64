@@ -506,6 +506,7 @@ PREAD(FHANDLE fd, void *buf, size_t count, off_t offset)
 #endif
 
 static uint8_t *kernel = NULL;
+static uint8_t kernel_version = 0;
 static size_t kernel_size = 0;
 
 static addr_t xnucore_base = 0;
@@ -528,6 +529,7 @@ init_kernel(addr_t base, const char *filename)
 {
     size_t rv;
     uint8_t buf[0x4000];
+    uint8_t *vstr = NULL;
     unsigned i, j;
     const struct mach_header *hdr = (struct mach_header *)buf;
     FHANDLE fd = INVALID_HANDLE;
@@ -683,6 +685,13 @@ init_kernel(addr_t base, const char *filename)
 
         CLOSE(fd);
     }
+
+    vstr = boyermoore_horspool_memmem(kernel, kernel_size, (uint8_t *)"Darwin Kernel Version", strlen("Darwin Kernel Version"));
+
+    if (vstr) {
+        kernel_version = atoi((const char *)vstr + strlen("Darwin Kernel Version") + 1);
+    }
+
     return 0;
 }
 
