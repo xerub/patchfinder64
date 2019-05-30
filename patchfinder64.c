@@ -425,6 +425,25 @@ follow_cbz(const uint8_t *buf, addr_t cbz)
     return cbz + ((*(int *)(buf + cbz) & 0x3FFFFE0) << 10 >> 13);
 }
 
+static addr_t
+xref64code(const uint8_t *buf, addr_t start, addr_t end, addr_t what)
+{
+    addr_t i;
+
+    end &= ~3;
+    for (i = start & ~3; i < end; i += 4) {
+        uint32_t op = *(uint32_t *)(buf + i);
+        if ((op & 0x7C000000) == 0x14000000) {
+            addr_t where = follow_call64(buf, i);
+            //printf("%llx: B[L] 0x%llx\n", i + kerndumpbase, kerndumpbase + where);
+            if (where == what) {
+                return i;
+            }
+        }
+    }
+    return 0;
+}
+
 /* kernel iOS10 **************************************************************/
 
 #include <fcntl.h>
@@ -432,7 +451,7 @@ follow_cbz(const uint8_t *buf, addr_t cbz)
 #include <stdlib.h>
 #include <unistd.h>
 #include <mach-o/loader.h>
-//#include "vfs.h" // img4lib
+// #include "vfs.h" // img4lib
 
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
 #include <mach/mach.h>
@@ -493,6 +512,8 @@ static addr_t xnucore_base = 0;
 static addr_t xnucore_size = 0;
 static addr_t prelink_base = 0;
 static addr_t prelink_size = 0;
+static addr_t pplcode_base = 0;
+static addr_t pplcode_size = 0;
 static addr_t cstring_base = 0;
 static addr_t cstring_size = 0;
 static addr_t pstring_base = 0;
@@ -544,12 +565,12 @@ init_kernel(addr_t base, const char *filename)
     q = buf + sizeof(struct mach_header) + is64;
     for (i = 0; i < hdr->ncmds; i++) {
         const struct load_command *cmd = (struct load_command *)q;
-        if (cmd->cmd == LC_SEGMENT_64) {
+        if (cmd->cmd == LC_SEGMENT_64 && ((struct segment_command_64 *)q)->vmsize) {
             const struct segment_command_64 *seg = (struct segment_command_64 *)q;
-            if (min > seg->vmaddr && seg->vmsize > 0) {
+            if (min > seg->vmaddr) {
                 min = seg->vmaddr;
             }
-            if (max < seg->vmaddr + seg->vmsize && seg->vmsize > 0) {
+            if (max < seg->vmaddr + seg->vmsize) {
                 max = seg->vmaddr + seg->vmsize;
             }
             if (!strcmp(seg->segname, "__TEXT_EXEC")) {
@@ -559,6 +580,10 @@ init_kernel(addr_t base, const char *filename)
             if (!strcmp(seg->segname, "__PLK_TEXT_EXEC")) {
                 prelink_base = seg->vmaddr;
                 prelink_size = seg->filesize;
+            }
+            if (!strcmp(seg->segname, "__PPLTEXT")) {
+                pplcode_base = seg->vmaddr;
+                pplcode_size = seg->filesize;
             }
             if (!strcmp(seg->segname, "__TEXT")) {
                 const struct section_64 *sec = (struct section_64 *)(seg + 1);
@@ -597,9 +622,19 @@ init_kernel(addr_t base, const char *filename)
         q = q + cmd->cmdsize;
     }
 
+    if (pstring_base == 0 && pstring_size == 0) {
+        pstring_base = cstring_base;
+        pstring_size = cstring_size;
+    }
+    if (prelink_base == 0 && prelink_size == 0) {
+        prelink_base = xnucore_base;
+        prelink_size = xnucore_size;
+    }
+
     kerndumpbase = min;
     xnucore_base -= kerndumpbase;
     prelink_base -= kerndumpbase;
+    pplcode_base -= kerndumpbase;
     cstring_base -= kerndumpbase;
     pstring_base -= kerndumpbase;
     kernel_size = max - min;
@@ -613,7 +648,6 @@ init_kernel(addr_t base, const char *filename)
         rv = kread(kerndumpbase, kernel, kernel_size);
         if (rv != kernel_size) {
             free(kernel);
-            kernel = NULL;
             return -1;
         }
 
@@ -635,7 +669,6 @@ init_kernel(addr_t base, const char *filename)
                 if (sz != seg->filesize) {
                     CLOSE(fd);
                     free(kernel);
-                    kernel = NULL;
                     return -1;
                 }
                 if (!kernel_mh) {
@@ -692,14 +725,20 @@ find_register_value(addr_t where, int reg)
 }
 
 addr_t
-find_reference(addr_t to, int n, int prelink)
+find_reference(addr_t to, int n, int where)
 {
     addr_t ref, end;
     addr_t base = xnucore_base;
     addr_t size = xnucore_size;
-    if (prelink) {
-        base = prelink_base;
-        size = prelink_size;
+    switch (where) {
+        case 1:
+            base = prelink_base;
+            size = prelink_size;
+            break;
+        case 2:
+            base = pplcode_base;
+            size = pplcode_size;
+            break;
     }
     if (n <= 0) {
         n = 1;
@@ -717,20 +756,22 @@ find_reference(addr_t to, int n, int prelink)
 }
 
 addr_t
-find_strref(const char *string, int n, int prelink)
+find_strref(const char *string, int n, int where)
 {
     uint8_t *str;
     addr_t base = cstring_base;
     addr_t size = cstring_size;
-    if (prelink) {
-        base = pstring_base;
-        size = pstring_size;
+    switch (where) {
+        case 1:
+            base = pstring_base;
+            size = pstring_size;
+            break;
     }
     str = boyermoore_horspool_memmem(kernel + base, size, (uint8_t *)string, strlen(string));
     if (!str) {
         return 0;
     }
-    return find_reference(str - kernel + kerndumpbase, n, prelink);
+    return find_reference(str - kernel + kerndumpbase, n, where);
 }
 
 addr_t
@@ -1276,6 +1317,49 @@ find_zone_map_ref(void)
     return val + kerndumpbase;
 }
 
+addr_t
+find_pmap_initialize_legacy_static_trust_cache_ppl(void)
+{
+    addr_t i = 0;
+    for (;;) {
+        addr_t site, jump, call;
+        site = step64(kernel, xnucore_base + i, xnucore_size - i, 0xD28004AF, 0xFFFFFFFF); // MOV X15, #0x25
+        if (!site) {
+            return 0;
+        }
+        jump = step64(kernel, site + 4, 4, INSN_B);
+        if (jump) {
+            call = xref64code(kernel, xnucore_base, xnucore_base + xnucore_size, site);
+            if (call) {
+                return call + kerndumpbase;
+            }
+            return site + kerndumpbase;
+        }
+        i = site - xnucore_base + 4;
+    }
+    return 0;
+}
+
+addr_t
+find_trust_cache_ppl(void)
+{
+    addr_t str, bof, val;
+    str = find_strref("\"loadable trust cache buffer too small (%ld) for entries claimed (%d)\"", 1, 2);
+    if (!str) {
+        return 0;
+    }
+    str -= kerndumpbase;
+    bof = bof64(kernel, pplcode_base, str);
+    if (!bof) {
+        return 0;
+    }
+    val = calc64(kernel, bof, str, 8);
+    if (!val) {
+        return 0;
+    }
+    return val + kerndumpbase;
+}
+
 /* extra_recipe **************************************************************/
 
 #define INSN_STR8 0xF9000000 | 8, 0xFFC00000 | 0x1F
@@ -1312,29 +1396,13 @@ find_AGXCommandQueue_vtable(void)
 addr_t
 find_allproc(void)
 {
-    addr_t val, bof, str8;
-    addr_t ref = find_strref("\"pgrp_add : pgrp is dead adding process\"", 1, 0);
+    addr_t val;
+    addr_t ref = find_strref("shutdownwait", 1, 0);
     if (!ref) {
         return 0;
     }
     ref -= kerndumpbase;
-    bof = bof64(kernel, xnucore_base, ref);
-    if (!bof) {
-        return 0;
-    }
-    str8 = step64_back(kernel, ref, ref - bof, INSN_STR8);
-    if (!str8) {
-        // iOS 11
-        addr_t ldp = step64(kernel, ref, 1024, INSN_POPS);
-        if (!ldp) {
-            return 0;
-        }
-        str8 = step64_back(kernel, ldp, ldp - bof, INSN_STR8);
-        if (!str8) {
-            return 0;
-        }
-    }
-    val = calc64(kernel, bof, str8, 8);
+    val = calc64(kernel, ref, ref + 32, 8);
     if (!val) {
         return 0;
     }
@@ -1431,31 +1499,23 @@ main(int argc, char **argv)
     rv = init_kernel(base, (argc > 1) ? argv[1] : "krnl");
     assert(rv == 0);
 
-    addr_t AGXCommandQueue_vtable = find_AGXCommandQueue_vtable();
-    printf("\t\t\t<string>0x%llx</string>\n", AGXCommandQueue_vtable - vm_kernel_slide);
-    addr_t OSData_getMetaClass = find_symbol("__ZNK6OSData12getMetaClassEv");
-    printf("\t\t\t<string>0x%llx</string>\n", OSData_getMetaClass);
-    addr_t OSSerializer_serialize = find_symbol("__ZNK12OSSerializer9serializeEP11OSSerialize");
-    printf("\t\t\t<string>0x%llx</string>\n", OSSerializer_serialize);
-    addr_t k_uuid_copy = find_symbol("_uuid_copy");
-    printf("\t\t\t<string>0x%llx</string>\n", k_uuid_copy);
     addr_t allproc = find_allproc();
-    printf("\t\t\t<string>0x%llx</string>\n", allproc);
+    printf("allproc = 0x%llx\n", allproc);
     addr_t realhost = find_realhost(find_symbol("_host_priv_self") + vm_kernel_slide);
-    printf("\t\t\t<string>0x%llx</string>\n", realhost - vm_kernel_slide);
-    addr_t call5 = find_call5();
-    printf("\t\t\t<string>0x%llx</string>\n", call5 - vm_kernel_slide);
+    printf("realhost = 0x%llx\n", realhost - vm_kernel_slide);
 
     addr_t trustcache = find_trustcache();
     if (!trustcache) {
         trustcache = find_cache(1);
     }
-    printf("\t\t\t<string>0x%llx</string>\n", trustcache);
+    printf("trustcache = 0x%llx\n", trustcache);
     addr_t amficache = find_amficache();
     if (!amficache) {
         amficache = find_cache(0);
     }
-    printf("\t\t\t<string>0x%llx</string>\n", amficache);
+    printf("amficache = 0x%llx\n", amficache);
+
+    printf("trustcache_ppl = func:0x%llx, data:0x%llx\n", find_pmap_initialize_legacy_static_trust_cache_ppl(), find_trust_cache_ppl());
 
     term_kernel();
     return 0;
