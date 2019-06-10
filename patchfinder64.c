@@ -703,11 +703,12 @@ term_kernel(void)
 
 /* these operate on VA ******************************************************/
 
-#define INSN_RET  0xD65F03C0, 0xFFFFFFFF
-#define INSN_CALL 0x94000000, 0xFC000000
-#define INSN_B    0x14000000, 0xFC000000
-#define INSN_CBZ  0x34000000, 0xFC000000
-#define INSN_BLR  0xD63F0000, 0xFFFFFC1F
+#define INSN_RETAB  0xD65F0FFF, 0xFFFFFFFF
+#define INSN_RET    0xD65F03C0, 0xFFFFFFFF
+#define INSN_CALL   0x94000000, 0xFC000000
+#define INSN_B      0x14000000, 0xFC000000
+#define INSN_CBZ    0x34000000, 0xFC000000
+#define INSN_BLR    0xD63F0000, 0xFFFFFC1F
 
 addr_t
 find_register_value(addr_t where, int reg)
@@ -786,13 +787,21 @@ find_strref(const char *string, int n, int where)
 addr_t
 find_gPhysBase(void)
 {
-    addr_t ret, val;
-    addr_t ref = find_strref("\"pmap_map_high_window_bd: insufficient pages", 1, 0);
+    addr_t ret = 0, val = 0;
+    addr_t ref = find_strref("pmap_alloc_page_for_kern", 1, 0);
     if (!ref) {
         return 0;
     }
     ref -= kerndumpbase;
-    ret = step64(kernel, ref, 64, INSN_RET);
+    if(kernel_version >= 18) {
+        // A12
+        ret = step64(kernel, ref, 384, INSN_RETAB);
+        if (!ret) {
+            ret = step64(kernel, ref, 384, INSN_RET);
+        }
+    } else {
+        ret = step64(kernel, ref, 64, INSN_RET);
+    }
     if (!ret) {
         // iOS 11
         ref = step64(kernel, ref, 1024, INSN_RET);
@@ -804,7 +813,11 @@ find_gPhysBase(void)
             return 0;
         }
     }
-    val = calc64(kernel, ref, ret, 8);
+    if(kernel_version >= 18) {
+        val = calc64(kernel, ref, ret, 9);
+    } else {
+        val = calc64(kernel, ref, ret, 8);
+    }
     if (!val) {
         return 0;
     }
