@@ -10,6 +10,7 @@ uint64_t find_register_value(uint64_t where, int reg);
 uint64_t find_reference(uint64_t to, int n, int prelink);
 uint64_t find_strref(const char *string, int n, int prelink);
 uint64_t find_gPhysBase(void);
+uint64_t find_ptov_table(void);
 uint64_t find_kernel_pmap(void);
 uint64_t find_amfiret(void);
 uint64_t find_ret_0(void);

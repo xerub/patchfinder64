@@ -825,6 +825,26 @@ find_gPhysBase(void)
 }
 
 addr_t
+find_ptov_table(void)
+{
+    addr_t bof, val;
+    addr_t ref = find_strref("\"ml_static_vtop(): illegal VA:", 1, 0);
+    if (!ref) {
+        return 0;
+    }
+    ref -= kerndumpbase;
+    bof = bof64(kernel, xnucore_base, ref);
+    if (!bof) {
+        return 0;
+    }
+    val = calc64(kernel, bof, bof + 48, 8);
+    if (!val) {
+        return 0;
+    }
+    return val + kerndumpbase;
+}
+
+addr_t
 find_kernel_pmap(void)
 {
     addr_t call, bof, val;
