@@ -451,7 +451,7 @@ xref64code(const uint8_t *buf, addr_t start, addr_t end, addr_t what)
 #include <stdlib.h>
 #include <unistd.h>
 #include <mach-o/loader.h>
-// #include "vfs.h" // img4lib
+//#include "vfs.h" // img4lib
 
 #ifdef __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
 #include <mach/mach.h>
@@ -506,7 +506,7 @@ PREAD(FHANDLE fd, void *buf, size_t count, off_t offset)
 #endif
 
 static uint8_t *kernel = NULL;
-static uint8_t kernel_version = 0;
+static int kernel_version = 0;
 static size_t kernel_size = 0;
 
 static addr_t xnucore_base = 0;
@@ -529,7 +529,7 @@ init_kernel(addr_t base, const char *filename)
 {
     size_t rv;
     uint8_t buf[0x4000];
-    uint8_t *vstr = NULL;
+    uint8_t *vstr;
     unsigned i, j;
     const struct mach_header *hdr = (struct mach_header *)buf;
     FHANDLE fd = INVALID_HANDLE;
@@ -650,6 +650,7 @@ init_kernel(addr_t base, const char *filename)
         rv = kread(kerndumpbase, kernel, kernel_size);
         if (rv != kernel_size) {
             free(kernel);
+            kernel = NULL;
             return -1;
         }
 
@@ -671,6 +672,7 @@ init_kernel(addr_t base, const char *filename)
                 if (sz != seg->filesize) {
                     CLOSE(fd);
                     free(kernel);
+                    kernel = NULL;
                     return -1;
                 }
                 if (!kernel_mh) {
@@ -686,10 +688,9 @@ init_kernel(addr_t base, const char *filename)
         CLOSE(fd);
     }
 
-    vstr = boyermoore_horspool_memmem(kernel, kernel_size, (uint8_t *)"Darwin Kernel Version", strlen("Darwin Kernel Version"));
-
+    vstr = boyermoore_horspool_memmem(kernel, kernel_size, (uint8_t *)"Darwin Kernel Version", sizeof("Darwin Kernel Version") - 1);
     if (vstr) {
-        kernel_version = atoi((const char *)vstr + strlen("Darwin Kernel Version") + 1);
+        kernel_version = atoi((const char *)vstr + sizeof("Darwin Kernel Version"));
     }
 
     return 0;
@@ -787,13 +788,13 @@ find_strref(const char *string, int n, int where)
 addr_t
 find_gPhysBase(void)
 {
-    addr_t ret = 0, val = 0;
+    addr_t ret, val;
     addr_t ref = find_strref("pmap_alloc_page_for_kern", 1, 0);
     if (!ref) {
         return 0;
     }
     ref -= kerndumpbase;
-    if(kernel_version >= 18) {
+    if (kernel_version >= 18) {
         // A12
         ret = step64(kernel, ref, 384, INSN_RETAB);
         if (!ret) {
@@ -813,7 +814,7 @@ find_gPhysBase(void)
             return 0;
         }
     }
-    if(kernel_version >= 18) {
+    if (kernel_version >= 18) {
         val = calc64(kernel, ref, ret, 9);
     } else {
         val = calc64(kernel, ref, ret, 8);
@@ -861,7 +862,7 @@ find_kernel_pmap(void)
     if (!bof) {
         return 0;
     }
-    if(kernel_version == 18) {
+    if (kernel_version == 18) {
         // iOS 12
         val = calc64(kernel, bof, call, 8);
     } else {
